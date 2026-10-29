@@ -1,0 +1,480 @@
+#!/bin/bash
+# MacCleanUp (maccleanup) — All-in-one macOS system maintenance & cleaning utility.
+
+MCU_VERSION="1.0.0"
+
+# Determine script root (robust symlink resolution)
+MCU_SOURCE="${BASH_SOURCE[0]}"
+while [[ -h "$MCU_SOURCE" ]]; do
+    MCU_DIR="$(cd -P "$(dirname "$MCU_SOURCE")" >/dev/null 2>&1 && pwd)"
+    MCU_SOURCE="$(readlink "$MCU_SOURCE")"
+    [[ "$MCU_SOURCE" != /* ]] && MCU_SOURCE="${MCU_DIR}/${MCU_SOURCE}"
+done
+MCU_ROOT="$(cd -P "$(dirname "$MCU_SOURCE")" >/dev/null 2>&1 && pwd)"
+
+# Source core library
+# shellcheck source=/dev/null
+source "${MCU_ROOT}/lib/core/ui.sh"
+# shellcheck source=/dev/null
+source "${MCU_ROOT}/lib/core/oplog.sh"
+# shellcheck source=/dev/null
+source "${MCU_ROOT}/lib/core/fs.sh"
+# shellcheck source=/dev/null
+source "${MCU_ROOT}/lib/core/config.sh"
+
+# Source subcommands
+# shellcheck source=/dev/null
+source "${MCU_ROOT}/lib/clean/clean.sh"
+# shellcheck source=/dev/null
+source "${MCU_ROOT}/lib/optimize/maintenance.sh"
+# shellcheck source=/dev/null
+source "${MCU_ROOT}/lib/uninstall/uninstall.sh"
+# shellcheck source=/dev/null
+source "${MCU_ROOT}/lib/purge/purge.sh"
+# shellcheck source=/dev/null
+source "${MCU_ROOT}/lib/installer/installer.sh"
+# shellcheck source=/dev/null
+source "${MCU_ROOT}/lib/slim/slim.sh"
+# shellcheck source=/dev/null
+source "${MCU_ROOT}/lib/touchid/touchid.sh"
+# shellcheck source=/dev/null
+source "${MCU_ROOT}/lib/status/status.sh"
+# shellcheck source=/dev/null
+source "${MCU_ROOT}/lib/analyze/analyze.sh"
+# shellcheck source=/dev/null
+source "${MCU_ROOT}/lib/update/update.sh"
+# shellcheck source=/dev/null
+source "${MCU_ROOT}/lib/completion/completion.sh"
+
+# Global flags
+DRY_RUN="${DRY_RUN:-false}"
+DEBUG="${DEBUG:-false}"
+DO_SYSTEM="${DO_SYSTEM:-false}"
+DO_ORPHANS="${DO_ORPHANS:-true}"
+AUTO_YES="${AUTO_YES:-0}"
+
+# ── Help message ─────────────────────────────────────────────────────────────
+show_help() {
+    echo -e "${BOLD}MacCleanUp (maccleanup)${NC} v${MCU_VERSION} — macOS maintenance & disk optimization CLI"
+    echo -e "Comprehensive system cleaner, maintenance toolkit, and disk explorer with YAML configuration."
+    echo ""
+    echo -e "${BOLD}USAGE:${NC}"
+    echo -e "  maccleanup [command] [options]"
+    echo -e "  maccleanup (runs interactive menu if no arguments provided)"
+    echo ""
+    echo -e "${BOLD}COMMANDS:${NC}"
+    echo -e "  ${CYAN}clean${NC}        Deep cache, log, leftover, and browser cleanup"
+    echo -e "  ${CYAN}uninstall${NC}    Smart app uninstaller with bundle ID & leftover detection"
+    echo -e "  ${CYAN}optimize${NC}     System maintenance: DNS, icon cache, QuickLook, Launch Services"
+    echo -e "  ${CYAN}analyze${NC}      Interactive disk usage explorer (TUI)"
+    echo -e "  ${CYAN}status${NC}       Live system monitor dashboard (CPU, RAM, disk, network)"
+    echo -e "  ${CYAN}purge${NC}        Dev artifact purge: stale node_modules, target, .build"
+    echo -e "  ${CYAN}installer${NC}    Stale installer cleanup (.dmg, .pkg, .iso, .xip)"
+    echo -e "  ${CYAN}slim${NC}         Universal binary slimmer (removes Intel slices on Apple Silicon)"
+    echo -e "  ${CYAN}touchid${NC}      Configure Touch ID for sudo authentication (enable/disable/status)"
+    echo -e "  ${CYAN}history${NC}      View operation logs (--json or --clear)"
+    echo -e "  ${CYAN}whitelist${NC}    Manage protected paths (list/add/remove/clear)"
+    echo -e "  ${CYAN}config${NC}       Manage configuration (show/edit/path/reset)"
+    echo -e "  ${CYAN}update${NC}       Check for git updates"
+    echo -e "  ${CYAN}completion${NC}   Output shell tab-completion script (zsh or bash)"
+    echo -e "  ${CYAN}help${NC}         Show this help message"
+    echo -e "  ${CYAN}version${NC}      Show version"
+    echo ""
+    echo -e "${BOLD}OPTIONS:${NC}"
+    echo -e "  ${YELLOW}--dry-run${NC}     Preview all actions without modifying or deleting files"
+    echo -e "  ${YELLOW}--system${NC}      Include system-level logs and diagnostics (clean command, requires sudo)"
+    echo -e "  ${YELLOW}--whitelist${NC}   Open interactive whitelist selector"
+    echo -e "  ${YELLOW}--debug${NC}       Show detailed debug output"
+    echo -e "  ${YELLOW}-y, --yes${NC}     Non-interactive mode (auto-confirm prompts)"
+    echo ""
+    echo -e "${BOLD}EXAMPLES:${NC}"
+    echo -e "  maccleanup clean --dry-run"
+    echo -e "  maccleanup clean --system"
+    echo -e "  maccleanup uninstall \"Slack\""
+    echo -e "  maccleanup uninstall --list"
+    echo -e "  maccleanup uninstall --with-data \"Slack\""
+    echo -e "  maccleanup analyze ~/Downloads"
+    echo -e "  maccleanup status --once"
+    echo -e "  maccleanup purge --days 30"
+    echo -e "  maccleanup whitelist add ~/Library/Caches/com.apple.Safari"
+    echo ""
+    echo -e "${BOLD}CONFIGURATION:${NC}"
+    echo -e "  Config file: ~/.config/maccleanup/config.yaml"
+    echo -e "  Whitelist:   ~/.config/maccleanup/whitelist"
+    echo -e "  Logs:        ~/Library/Logs/maccleanup/operations.log"
+}
+
+# ── System Info Header ────────────────────────────────────────────────────────
+ui_system_overview() {
+    local os_ver model chip disk_info
+    os_ver=$(sw_vers -productVersion 2>/dev/null || echo "macOS")
+    chip=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m)
+    model=$(sysctl -n hw.model 2>/dev/null || echo "Mac")
+    disk_info=$(df -h / 2>/dev/null | awk 'NR==2{printf "%s free of %s (%s used)", $4, $2, $5}')
+
+    echo -e "${GRAY}Hardware:${NC} ${model} (${chip})  ${GRAY}OS:${NC} macOS ${os_ver}"
+    echo -e "${GRAY}Storage:${NC}  ${disk_info}"
+}
+
+# ── Install CLI to PATH ───────────────────────────────────────────────────────
+run_install_cli() {
+    echo ""
+    echo -e "${BOLD}Installing MacCleanUp (maccleanup) to your system PATH...${NC}"
+    local target_dir="$HOME/.local/bin"
+    mkdir -p "$target_dir"
+
+    ln -sf "${MCU_ROOT}/maccleanup" "${target_dir}/maccleanup"
+
+    echo -e "  ${GREEN}${ICON_OK}${NC} Linked to ${target_dir}/maccleanup"
+
+    # Check if ~/.local/bin is in PATH
+    if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+        local rc_file="$HOME/.zshrc"
+        [[ -f "$HOME/.bashrc" && "$SHELL" =~ bash ]] && rc_file="$HOME/.bashrc"
+        if ! grep -q 'export PATH="$HOME/.local/bin:$PATH"' "$rc_file" 2>/dev/null; then
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$rc_file"
+            echo -e "  ${GREEN}${ICON_OK}${NC} Added ~/.local/bin to ${rc_file}"
+        fi
+        echo -e "\n${YELLOW}Restart your terminal or run:${NC} source ${rc_file}"
+    fi
+
+    echo -e "\n${BOLD}${GREEN}Installation complete!${NC} You can now type ${CYAN}maccleanup${NC} from anywhere."
+}
+
+# ── Interactive Menu (no args mode) ──────────────────────────────────────────
+run_interactive_menu() {
+    while true; do
+        clear 2>/dev/null || true
+        echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${BOLD}${CYAN}║                    MacCleanUp (maccleanup)                          ║${NC}"
+        echo -e "${BOLD}${CYAN}║          macOS System Maintenance & Deep Clean Utility           ║${NC}"
+        echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        ui_system_overview
+        echo ""
+        echo -e "${BOLD}Select an action:${NC}"
+        echo -e "  ${CYAN}[1]${NC}  ${BOLD}Clean Mac${NC}           ${GRAY}[c]${NC}  Deep cache, log, browser & leftover cleanup"
+        echo -e "  ${CYAN}[2]${NC}  ${BOLD}Dry-Run Clean${NC}       ${GRAY}[d]${NC}  Preview reclaimable space (safe preview)"
+        echo -e "  ${CYAN}[3]${NC}  ${BOLD}Optimize System${NC}     ${GRAY}[o]${NC}  DNS flush, icon cache, QuickLook reset"
+        echo -e "  ${CYAN}[4]${NC}  ${BOLD}Analyze Disk Usage${NC}  ${GRAY}[a]${NC}  Interactive visual directory explorer"
+        echo -e "  ${CYAN}[5]${NC}  ${BOLD}Live System Monitor${NC} ${GRAY}[s]${NC}  CPU, RAM, Disk, Net real-time dashboard"
+        echo -e "  ${CYAN}[6]${NC}  ${BOLD}Uninstall App${NC}       ${GRAY}[u]${NC}  Remove app with full leftover cleanup"
+        echo -e "  ${CYAN}[7]${NC}  ${BOLD}Dev Artifact Purge${NC}  ${GRAY}[p]${NC}  Clean stale node_modules, target, .build"
+        echo -e "  ${CYAN}[8]${NC}  ${BOLD}Installer Cleanup${NC}   ${GRAY}[i]${NC}  Remove old .dmg, .pkg, .iso files"
+        echo -e "  ${CYAN}[9]${NC}  ${BOLD}Slim Universal Apps${NC} ${GRAY}[m]${NC}  Remove Intel slices on Apple Silicon"
+        echo -e "  ${CYAN}[10]${NC} ${BOLD}Touch ID for Sudo${NC}   ${GRAY}[t]${NC}  Check / toggle Touch ID authentication"
+        echo -e "  ${CYAN}[11]${NC} ${BOLD}Operation History${NC}   ${GRAY}[h]${NC}  View log of past actions"
+        echo -e "  ${CYAN}[12]${NC} ${BOLD}Whitelist Manager${NC}   ${GRAY}[w]${NC}  View & manage protected paths"
+        echo -e "  ${CYAN}[13]${NC} ${BOLD}Configuration${NC}       ${GRAY}[k]${NC}  View or edit config.yaml"
+        echo -e "  ${CYAN}[14]${NC} ${BOLD}Install to PATH${NC}     ${GRAY}[n]${NC}  Enable running 'maccleanup' anywhere in terminal"
+        echo -e "  ${CYAN}[0]${NC}  ${GRAY}Exit [q]${NC}"
+        echo ""
+        read -r -p "Enter choice [1-14 or key]: " choice
+
+        case "$choice" in
+            1|c|C)
+                DRY_RUN="false"
+                run_clean
+                ;;
+            2|d|D)
+                DRY_RUN="true"
+                run_clean
+                ;;
+            3|o|O)
+                run_optimize
+                ;;
+            4|a|A)
+                read -r -p "Directory to analyze [default ~]: " target
+                run_analyze "${target:-$HOME}"
+                ;;
+            5|s|S)
+                run_status
+                ;;
+            6|u|U)
+                read -r -p "Enter Application name (e.g. Google Chrome): " target_app
+                if [[ -n "$target_app" ]]; then
+                    run_uninstall_app "$target_app"
+                fi
+                ;;
+            7|p|P)
+                run_dev_purge
+                ;;
+            8|i|I)
+                run_installer_cleanup
+                ;;
+            9|m|M)
+                run_slim
+                ;;
+            10|t|T)
+                run_touchid "status"
+                echo ""
+                read -r -p "Toggle Touch ID? [e=enable, d=disable, Enter=skip]: " tid_choice
+                case "$tid_choice" in
+                    e|E|enable) run_touchid "enable" ;;
+                    d|D|disable) run_touchid "disable" ;;
+                esac
+                ;;
+            11|h|H)
+                oplog_history
+                ;;
+            12|w|W)
+                run_whitelist_cmd "list"
+                ;;
+            13|k|K)
+                run_config_cmd "show"
+                ;;
+            14|n|N)
+                run_install_cli
+                ;;
+            0|q|Q)
+                echo "Goodbye!"
+                exit 0
+                ;;
+            *)
+                echo -e "${YELLOW}Invalid option.${NC}"
+                ;;
+        esac
+
+        echo ""
+        read -r -p "Press Enter to return to menu..." _dummy
+    done
+}
+
+# ── Main Entrypoint ──────────────────────────────────────────────────────────
+main() {
+    # Initialize config and logging
+    config_load
+    oplog_init
+
+    # No arguments -> Interactive TUI Menu
+    if [[ $# -eq 0 ]]; then
+        run_interactive_menu
+        exit 0
+    fi
+
+    local cmd="$1"
+    shift
+
+    # Parse global flags that might come first or pass through
+    case "$cmd" in
+        --dry-run)
+            DRY_RUN="true"
+            if [[ $# -eq 0 ]]; then
+                run_clean
+                exit 0
+            else
+                cmd="$1"
+                shift
+            fi
+            ;;
+        -h|--help|help)
+            show_help
+            exit 0
+            ;;
+        -v|--version|version)
+            echo "MacCleanUp (maccleanup) v${MCU_VERSION}"
+            exit 0
+            ;;
+        menu)
+            run_interactive_menu
+            exit 0
+            ;;
+    esac
+
+    # Handle subcommands
+    case "$cmd" in
+        clean)
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --dry-run) DRY_RUN="true" ;;
+                    --debug) DEBUG="true" ;;
+                    --system) DO_SYSTEM="true" ;;
+                    --no-orphans) DO_ORPHANS="false" ;;
+                    --whitelist)
+                        whitelist_manage \
+                            "$HOME/Library/Caches" \
+                            "$HOME/Library/Logs" \
+                            "$HOME/.Trash" \
+                            "$HOME/Library/Caches/com.apple.Safari" \
+                            "$HOME/Library/Caches/Google/Chrome" \
+                            "$HOME/Library/Application Support/Code/Cache" \
+                            "$HOME/.gradle/caches" \
+                            "$HOME/.cargo/registry/cache"
+                        exit 0
+                        ;;
+                    *)
+                        echo "Unknown flag for clean: $1"
+                        exit 1
+                        ;;
+                esac
+                shift
+            done
+            run_clean
+            ;;
+
+        uninstall)
+            local app_target="" list_apps="false"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --dry-run|--list-only) DRY_RUN="true" ;;
+                    --permanent) UNINSTALL_TRASH="false" ;;
+                    --with-data) UNINSTALL_WITH_DATA="true" ;;
+                    --list) list_apps="true" ;;
+                    -y|--yes) AUTO_YES=1 ;;
+                    *) app_target="$1" ;;
+                esac
+                shift
+            done
+            if [[ "$list_apps" == "true" ]]; then
+                run_uninstall_list_apps
+                exit 0
+            fi
+            if [[ -z "$app_target" ]]; then
+                echo -e "${RED}Error: specify an application name.${NC}"
+                echo "Example: maccleanup uninstall \"Google Chrome\""
+                exit 1
+            fi
+            run_uninstall_app "$app_target"
+            ;;
+
+        optimize)
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --dry-run) DRY_RUN="true" ;;
+                    --reindex-spotlight) REINDEX_SPOTLIGHT=1 ;;
+                    *)
+                        echo "Unknown flag for optimize: $1"
+                        exit 1
+                        ;;
+                esac
+                shift
+            done
+            run_optimize
+            ;;
+
+        analyze)
+            local target_dir="$HOME"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --threshold)
+                        shift
+                        ANALYZE_THRESHOLD_MB="$1"
+                        ;;
+                    *)
+                        target_dir="$1"
+                        ;;
+                esac
+                shift
+            done
+            run_analyze "$target_dir"
+            ;;
+
+        status)
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --once) STATUS_ONCE="true" ;;
+                    --json) STATUS_JSON="true"; STATUS_ONCE="true" ;;
+                    --watch) STATUS_WATCH="true" ;;
+                    --interval)
+                        shift
+                        STATUS_REFRESH_SECONDS="$1"
+                        ;;
+                    *)
+                        echo "Unknown flag for status: $1"
+                        exit 1
+                        ;;
+                esac
+                shift
+            done
+            run_status
+            ;;
+
+        purge)
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --dry-run) DRY_RUN="true" ;;
+                    --days)
+                        shift
+                        PURGE_MIN_AGE_DAYS="$1"
+                        ;;
+                    -y|--yes) AUTO_YES=1 ;;
+                    *)
+                        echo "Unknown flag for purge: $1"
+                        exit 1
+                        ;;
+                esac
+                shift
+            done
+            run_dev_purge
+            ;;
+
+        installer)
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --dry-run) DRY_RUN="true" ;;
+                    --days)
+                        shift
+                        INSTALLER_MIN_AGE_DAYS="$1"
+                        ;;
+                    -y|--yes) AUTO_YES=1 ;;
+                    *)
+                        echo "Unknown flag for installer: $1"
+                        exit 1
+                        ;;
+                esac
+                shift
+            done
+            run_installer_cleanup
+            ;;
+
+        slim)
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --dry-run) DRY_RUN="true" ;;
+                    *)
+                        echo "Unknown flag for slim: $1"
+                        exit 1
+                        ;;
+                esac
+                shift
+            done
+            run_slim
+            ;;
+
+        touchid)
+            run_touchid "${1:-status}"
+            ;;
+
+        history)
+            oplog_history "${1:-}"
+            ;;
+
+        whitelist)
+            run_whitelist_cmd "$@"
+            ;;
+
+        config)
+            run_config_cmd "$@"
+            ;;
+
+        update)
+            run_update
+            ;;
+
+        install)
+            run_install_cli
+            ;;
+
+        completion)
+            run_completion "${1:-zsh}"
+            ;;
+
+        *)
+            echo -e "${RED}Unknown command: ${cmd}${NC}"
+            echo "Run 'maccleanup help' for a list of available commands."
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

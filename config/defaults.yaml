@@ -1,0 +1,104 @@
+# MacCleanUp — Default Configuration
+# Location: ~/.config/maccleanup/config.yaml
+#
+# All paths support ~ expansion. Glob patterns are supported in whitelist entries.
+# Lists marked "extra_paths" are MERGED with built-in defaults unless override: true.
+
+version: "1"
+
+general:
+  dry_run: false                      # Set true to always preview without deleting
+  log_level: info                     # debug | info | warn | error
+  log_dir: ~/Library/Logs/maccleanup        # Operation log directory
+  trash_route: true                   # Route uninstall deletions through Trash
+
+clean:
+  # Additional cache/log paths to include in `maccleanup clean` (merged with built-ins).
+  extra_paths: []
+  #  - path: ~/Library/Caches/com.myapp.cache
+  #    mode: clean           # empty the directory contents
+  #  - path: ~/Library/Application Support/MyApp/tmp
+  #    mode: remove          # delete the path entirely
+  #  - path: ~/Library/Group Containers/group.myapp/Media
+  #    mode: clean_if_large
+  #    min_size_mb: 500
+
+  # Paths to NEVER touch, even if matched by the built-in list.
+  # Same as: maccleanup clean --whitelist (interactive menu saves here too).
+  whitelist: []
+  #  - ~/Library/Caches/com.apple.Safari
+  #  - ~/.gradle/caches/modules-2/files-2.1
+
+  # Set true to replace the entire built-in path list with extra_paths only.
+  override: false
+
+  # Only clean directories larger than this threshold (MB). 0 = always clean.
+  min_size_mb: 0
+
+  # Remove .DS_Store files under these directories (empty = disabled)
+  ds_store_trees: []
+  #  - ~/Desktop
+  #  - ~/Documents
+  #  - ~/Downloads
+
+  trash:
+    enabled: true     # Empty ~/.Trash as part of maccleanup clean
+    whitelist: false  # Set true to protect Trash from being emptied
+
+purge:
+  # Project root directories scanned for stale build artifacts.
+  paths:
+    - ~/Documents
+    - ~/Downloads
+    - ~/Desktop
+    - ~/Developer
+    - ~/dev
+    - ~/Projects
+    - ~/Code
+
+  min_age_days: 14
+
+  artifact_names:
+    - node_modules
+    - target
+    - .build
+    - dist
+    - __pycache__
+    - .dart_tool
+    - .venv
+    - venv
+
+installer:
+  scan_paths:
+    - ~/Downloads
+    - ~/Desktop
+    - ~/Library/Mobile Documents/com~apple~CloudDocs/Downloads
+    - ~/Library/Containers/com.apple.mail/Data/Library/Mail Downloads
+
+  min_age_days: 3
+
+  extensions:
+    - .dmg
+    - .pkg
+    - .mpkg
+    - .iso
+    - .xip
+
+analyze:
+  large_file_threshold_mb: 100
+  default_path: "~"
+
+status:
+  refresh_interval_seconds: 1
+
+optimize:
+  whitelist: []
+
+slim:
+  scan_paths:
+    - /Applications
+    - ~/Applications
+
+uninstall:
+  trash_route: true
+  include_personal_data: false
